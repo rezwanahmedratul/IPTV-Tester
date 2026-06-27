@@ -93,7 +93,7 @@ def parse_args() -> Config:
     parser.add_argument(
         "--ping-count",
         type=int,
-        default=5,
+        default=1,
         help="Number of validation checks per stream to calculate average latency"
     )
 

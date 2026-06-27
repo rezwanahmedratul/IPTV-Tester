@@ -105,37 +105,44 @@ def validate_stream_average(
 ) -> Tuple[bool, float, str]:
     """
     Executes validate_stream up to ping_count times.
-    If the first probe fails, we immediately return False.
-    Otherwise, we run the remaining probes and compute the average latency.
+    If a validation probe fails, its latency is recorded as the maximum timeout latency
+    (timeout_seconds * 1000) to penalize the average.
+    Aborts early if the sum of latencies so far makes it impossible to meet max_latency_ms.
     """
     latencies = []
     reasons = []
+    success_count = 0
+    penalty_latency = timeout_seconds * 1000.0
+    max_total_latency = max_latency_ms * ping_count
     
-    # 1. First probe
-    is_alive, latency_ms, reason = validate_stream(
-        url, ffprobe_path, timeout_seconds, require_both
-    )
-    if not is_alive:
-        return False, latency_ms, reason
-        
-    latencies.append(latency_ms)
-    
-    # 2. Subsequent probes (only if ping_count > 1)
-    for _ in range(1, ping_count):
-        probe_alive, probe_latency, probe_reason = validate_stream(
+    for i in range(ping_count):
+        is_alive, latency_ms, reason = validate_stream(
             url, ffprobe_path, timeout_seconds, require_both
         )
-        if probe_alive:
-            latencies.append(probe_latency)
+        if is_alive:
+            latencies.append(latency_ms)
+            success_count += 1
         else:
-            reasons.append(probe_reason)
+            latencies.append(penalty_latency)
+            reasons.append(reason)
             
-    # Calculate average latency of successful probes
-    if not latencies:
-        return False, 0.0, f"All probes failed: {'; '.join(set(reasons))}"
-        
-    avg_latency = sum(latencies) / len(latencies)
+        # Early abort optimization: if accumulated latency exceeds total allowed latency
+        current_sum = sum(latencies)
+        if current_sum > max_total_latency:
+            remaining_pings = ping_count - len(latencies)
+            total_projected_latency = current_sum + (remaining_pings * penalty_latency)
+            avg_projected_latency = total_projected_latency / ping_count
+            
+            if success_count == 0:
+                return False, avg_projected_latency, f"Probes failed. Projected average latency ({avg_projected_latency:.1f}ms) exceeded threshold of {max_latency_ms}ms. Reasons: {'; '.join(set(reasons))}"
+            else:
+                return False, avg_projected_latency, f"Projected average latency ({avg_projected_latency:.1f}ms) exceeded threshold of {max_latency_ms}ms"
+                
+    avg_latency = sum(latencies) / ping_count
     
+    if success_count == 0:
+        return False, avg_latency, f"All probes failed: {'; '.join(set(reasons))}"
+        
     if avg_latency > max_latency_ms:
         return False, avg_latency, f"High Latency ({avg_latency:.1f}ms average > {max_latency_ms}ms)"
         

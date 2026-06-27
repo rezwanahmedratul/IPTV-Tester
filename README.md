@@ -9,7 +9,7 @@ Optimized to process massive playlists containing **10,000 to 100,000+ channels*
 ## 🚀 Key Features
 
 *   **📂 Multi-Playlist Directory Aggregation**: Scans and parses all `.m3u` and `.m3u8` playlists in the `input/` folder, sorting and consolidating them deterministically.
-*   **🛠️ True Stream Verification**: Invokes `FFprobe` to open the stream and verifies that at least one valid audio or video stream exists, instead of relying strictly on HTTP status codes (which can redirect to placeholders or login pages).
+*   **🛠️ True Stream Verification**: Invokes `FFprobe` to open the stream and verifies that at least one valid audio or video stream exists, instead of relying strictly on HTTP status codes.
 *   **⏱️ Latency & Timeout Boundaries**: Measures the elapsed clock time from process launch until the stream is identified. Filters out slow streams (default limit is `<= 500 ms`). Validations timeout at 5 seconds by default to prevent hangs.
 *   **🔄 Intelligent Deduplication**: Automatically detects and drops duplicate URLs, duplicate channel names, and duplicate raw EXTINF headers across all input playlists.
 *   **⏸️ Resume Support**: Remembers all processed streams (both dead and alive). If the process crashes or is cancelled (Ctrl+C), it picks up right where it left off on the next run using `--resume`.
@@ -45,6 +45,8 @@ flowchart TD
 3.  **Directory Aggregation**: Scans `input/` for all `.m3u` and `.m3u8` files, sorting them to guarantee a deterministic processing order. It merges all entries into a unified list.
 4.  **Pre-deduplication**: Filters the aggregated queue to discard duplicate URLs or identical headers before validation, saving execution time.
 5.  **Parallel Validation**: Runs streams through a `ThreadPoolExecutor`. Workers call `FFprobe` with a 1-second analysis limit (`-analyzeduration 1000000 -probesize 1000000`) to fetch metadata instantly.
+    *   **Single-Probe (Default)**: Validates each channel using a single FFprobe check.
+    *   **Multi-Probe (Average Latency)**: If `--ping-count N` is set to more than `1`, it checks the stream up to `N` times and averages the latencies. Failed probes (due to timeout or errors) contribute the maximum timeout value (e.g. `5000` ms) to penalize the average. If the cumulative latency at any point makes it mathematically impossible to satisfy the max latency limit, it aborts early to prevent wasting connection time.
 6.  **Thread-Safe Writing**: When a stream passes, the worker locks access, appends it to `output/working.m3u`, updates the dashboard stats, and records the output to `logs/alive.log` and `logs/resume.dat`. If a stream fails, it logs to `logs/dead.log`.
 7.  **Dashboard & Reports**: The console updates 4 times per second with statistics. Upon completion, a JSON/CSV report is compiled detailing validation results.
 
@@ -84,22 +86,38 @@ pip install -r iptv_cleaner/requirements.txt
 Use the included launcher script `run.sh` from the workspace root (it automatically handles virtual environment activation):
 
 ### 🔹 Basic Run
-Reads all files in `input/`, validates streams, and outputs a single working playlist to `output/working.m3u`:
+Reads all files in `input/`, validates streams using a single probe, and outputs a single working playlist to `output/working.m3u`:
 ```bash
 ./run.sh
 ```
 
-### 🔹 Run with Custom Limits
-Configure workers, latency thresholds, socket timeouts, and report generation:
-```bash
-./run.sh --workers 60 --timeout 4.0 --max-latency 450 --json-report --csv-report
-```
+### 🔹 Custom Configurations & Examples
 
-### 🔹 Resuming a Previous Run
-Picks up from the last checkpoint using logs:
+Here are some common customization examples to optimize the cleaner for different network conditions and playlist sizes:
+
+#### ⚡ 1. High-Concurrency Fast Scan (Recommended for large playlists)
 ```bash
-./run.sh --resume
+./run.sh --workers 80 --timeout 3.0 --max-latency 400
 ```
+*   **Description**: Spawns **80 parallel worker threads** to process channels quickly, sets a aggressive connection **timeout of 3.0 seconds**, and filters out any channels with a startup latency exceeding **400 ms**. Best for rapid playlist sanitization.
+
+#### 🛡️ 2. Deep Stability Check (Averaging & strict stream types)
+```bash
+./run.sh --ping-count 5 --max-latency 350 --require-both --json-report --csv-report
+```
+*   **Description**: Validates each responsive stream **5 times** and calculates their average latency, rejecting any channel with an average startup latency over **350 ms**. It requires **both video and audio streams** to be present, and outputs summary reports to JSON and CSV. Best for producing a premium, highly stable playlist.
+
+#### ⏸️ 3. Safe Resume Run (Continues after cancellation or crash)
+```bash
+./run.sh --resume --workers 40
+```
+*   **Description**: Resumes an interrupted run, loading `logs/resume.dat` and `output/working.m3u` to skip already checked streams. Continues checking the remainder with 40 workers.
+
+#### ⏱️ 4. Quick Response Scan (No retries)
+```bash
+./run.sh --no-retry --timeout 2.0
+```
+*   **Description**: Disables the default stream retry logic (which retries failed streams once on failure) and enforces a strict **2-second timeout** per channel. Ensures the resulting playlist has only immediately responsive channels.
 
 ---
 
@@ -119,6 +137,7 @@ Picks up from the last checkpoint using logs:
 | `--csv-report` | `[path]` | `None` | Save a CSV run report (defaults to `report.csv` if flag present) |
 | `--require-both` | Flag | `False` | Require both video and audio streams to pass validation |
 | `--no-retry` | Flag | `False` | Disable retrying failed streams once before marking dead |
+| `--ping-count` | `int` | `1` | Number of validation checks per stream to average latency |
 
 ---
 
